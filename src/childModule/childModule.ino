@@ -15,7 +15,6 @@
 #define TRAP_CHECK
 #define TRAP_OUT 12
 #define TRAP_IN 14
-#define JSON_TRAP_FIRE "trapFire"
 /************************* 接続モジュール数確認用LED *************************/
 #define LED 13
 #define BLINK_PERIOD 1000000  // microseconds until cycle repeat
@@ -29,6 +28,7 @@
 #define DEF_SLEEP_INTERVAL 3600	// 60分間隔起動
 #define DEF_WORK_TIME 180	// 3分間稼働
 #define DEF_TRAP_MODE false // 設置モード
+#define DEF_TRAP_FIRE false // 罠作動済みフラグ
 /************************* 設定値上限下限値 *************************/
 #define MAX_SLEEP_INTERVAL 3600	// 60分
 #define MIN_SLEEP_INTERVAL 10	// 1分
@@ -38,6 +38,10 @@
 #define JSON_SLEEP_INTERVAL "SleepInterval"
 #define JSON_WORK_TIME "WorkTime"
 #define JSON_TRAP_MODE "TrapMode"	// o -> トラップ設置モード, 1 -> トラップ起動モード
+#define JSON_TRAP_FIRE "trapFire"
+// 設定値以外の Json
+#define JSON_TRAP_FIRE_MESSAGE "trapFireMessage"
+#define JSON_BATTERY_DEAD_MESSAGE "BatteryDeadMessage"
 /************************* json buffer number *************************/
 #define JSON_BUF_NUM 128
 
@@ -50,7 +54,6 @@
 // #define BATTERY_CHECK	// バッテリー残量チェックを行わない場合（分圧用抵抗が無いなど）はこの行をコメントアウト
 #define DISCHARGE_END_VOLTAGE 600	// 放電終止電圧(1V)として1/6に分圧した場合の読み取り値
 #define BATTERY_CHECK_INTERVAL 30	// バッテリー残量チェック間隔(msec)
-#define JSON_BATTERY_DEAD "BatteryDead"
 
 /************************* WiFi Access Point *********************************/
 #define WLAN_SSID "YOUR_SSID"
@@ -67,6 +70,7 @@
 long _sleepInterval = DEF_SLEEP_INTERVAL;
 long _workTime = DEF_WORK_TIME;
 bool _trapMode = DEF_TRAP_MODE;
+bool _trapFire = DEF_TRAP_FIRE;
 
 /************ Global State (you don't need to change this!) ******************/
 // Create an ESP8266 WiFiClient class to connect to the MQTT server.
@@ -84,6 +88,7 @@ unsigned long currentTime = 0;
 // 放電終止電圧を下回ったらシャットダウン
 boolean isBatteryEnough = true;
 bool isFire = false;
+bool isTrapStart = false;
 
 unsigned long messageReceiveTime = 0;
 
@@ -141,6 +146,10 @@ void loop()
 		ESP.deepSleep(0);
 		// ESP.deepSleep(3 * 1000 * 1000);
 	}
+	if (isTrapStart) {
+		beginTrapModeLed();
+		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+	}
 
 	if ( _trapMode && _sleepInterval != 0 && millis() > _workTime * 1000)
 	{
@@ -150,10 +159,11 @@ void loop()
 
 	#ifdef TRAP_CHECK
 		// 起動 3 秒後から検知開始(起動直後はちょっと不安)
-		if ( !isFire && _trapMode && millis() > 3 * 1000 && digitalRead(TRAP_IN)) {
+		if ( !_trapFire && _trapMode && millis() > 3 * 1000 && digitalRead(TRAP_IN)) {
 			Serial.println("trap fire");
+			_trapFire = true;
 			sendTrapFire();
-			isFire = true;
+			saveCurrentModuleSeting();
 		}
 	#endif
 
@@ -180,21 +190,22 @@ void receivedCallback(uint32_t from, String &msg)
 		return;
 	}
 	// 子モジュールはバッテリー切れ端末が発生しても特に何もしない
-	if (jsonMessage.containsKey(JSON_BATTERY_DEAD)) {
+	if (jsonMessage.containsKey(JSON_BATTERY_DEAD_MESSAGE)) {
 		Serial.println("battery dead message");
 		return;
 	}
-	if (jsonMessage.containsKey(JSON_TRAP_FIRE)) {
+	if (jsonMessage.containsKey(JSON_TRAP_FIRE_MESSAGE)) {
 		Serial.println("trap fire message");
 		return;
 	}
+	// 罠検知済みフラグは自身の設定値を反映
+	jsonMessage[JSON_TRAP_FIRE] = _trapFire;
 	boolean preTrapMode = _trapMode;
 	updateModuleSetting(jsonMessage);
 	saveCurrentModuleSeting();
 	// 設置モードから罠モードへ移行
 	if (!preTrapMode && _trapMode) {
-		beginTrapModeLed(preTrapMode);
-		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+		isTrapStart = true;
 	}
 }
 
@@ -238,6 +249,7 @@ void setDefaultModuleSetting()
 	JsonObject& defaultConfig = jsonBuf.createObject();
 	defaultConfig[JSON_SLEEP_INTERVAL] = DEF_SLEEP_INTERVAL;
 	defaultConfig[JSON_WORK_TIME] = DEF_WORK_TIME;
+	defaultConfig[JSON_TRAP_FIRE] = DEF_TRAP_FIRE;
 }
 
 // モジュールに保存してある設定を読み出す
@@ -304,6 +316,7 @@ void updateModuleSetting(JsonObject& config) {
 	}
 	// 罠モード
 	_trapMode = config[JSON_TRAP_MODE];
+	_trapFire = _trapMode ? config[JSON_TRAP_FIRE] : false;
 }
 
 // 設定ファイルを保存する
@@ -329,6 +342,7 @@ boolean saveCurrentModuleSeting() {
 	config[JSON_TRAP_MODE] = _trapMode;
 	config[JSON_SLEEP_INTERVAL] = _sleepInterval;
 	config[JSON_WORK_TIME] = _workTime;
+	config[JSON_TRAP_FIRE] = _trapFire;
 	return saveModuleSetting(config);
 }
 
@@ -336,7 +350,7 @@ boolean saveCurrentModuleSeting() {
 void sendBatteryDead() {
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
 	JsonObject &batteryDead = jsonBuf.createObject();
-	batteryDead[JSON_BATTERY_DEAD] = mesh.getChipId();
+	batteryDead[JSON_BATTERY_DEAD_MESSAGE] = mesh.getChipId();
 	String message;
 	batteryDead.printTo(message);
 	mesh.sendBroadcast(message);
@@ -348,13 +362,13 @@ void sendBatteryDead() {
 void sendTrapFire() {
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
 	JsonObject &trapFire = jsonBuf.createObject();
-	trapFire[JSON_TRAP_FIRE] = mesh.getChipId();
+	trapFire[JSON_TRAP_FIRE_MESSAGE] = mesh.getChipId();
 	String message;
 	trapFire.printTo(message);
 	mesh.sendBroadcast(message);
 }
 
-void beginTrapModeLed(boolean preTrapMode) {
+void beginTrapModeLed() {
 	unsigned long blink = millis();
 	uint8_t temp = 1;
 	digitalWrite(LED, HIGH);
@@ -407,8 +421,6 @@ void handlePost()
 	// 設定値を全モジュールに反映
 	String html = "";
 	boolean preTrapMode = _trapMode;
-	Serial.print("preTestMode:");
-	Serial.println(preTrapMode);
 	if (updateAllModuleSettings(config)) {
 		updateModuleSetting(config);
 		saveCurrentModuleSeting();
@@ -423,8 +435,7 @@ void handlePost()
 	server.send(200, "text/html", html);
 	// 設置モードから罠モードへ移行
 	if (!preTrapMode && _trapMode) {
-		beginTrapModeLed(preTrapMode);
-		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+		isTrapStart = true;
 	}
 }
 
@@ -528,6 +539,9 @@ String createSettingHtml()
 	html += "    </span><br>";
 	html += "    <span>ModuleID:";
 	html += mesh.getChipId();
+	html += "    </span><br>";
+	html += "    <span>TrapFire:";
+	html += _trapFire ? "Fired" : "Not Fired";
 	html += "    </span><br>";
 	html += "    <span>SleepInterval(max:3600sec):";
 	html += _sleepInterval;
