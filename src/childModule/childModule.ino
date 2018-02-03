@@ -11,38 +11,46 @@
 #include <FS.h>
 #include <WiFiClient.h>
 
-// 接続モジュール数確認用LED
-#define LED 5
+/************************* 罠検知設定 *************************/
+#define TRAP_CHECK
+#define TRAP_OUT 12
+#define TRAP_IN 14
+#define JSON_TRAP_FIRE "trapFire"
+/************************* 接続モジュール数確認用LED *************************/
+#define LED 13
 #define BLINK_PERIOD 1000000  // microseconds until cycle repeat
 #define BLINK_DURATION 100000 // microseconds LED is on for
-// メッシュネットワーク設定
+/************************* メッシュネットワーク設定 *************************/
 #define MESH_PREFIX "trapModule"
 #define MESH_PASSWORD "123456789"
 #define MESH_PORT 5555
 
-// デフォルト設定値
-#define DEF_SLEEP_INTERVAL 600	// 10分間隔起動
+/************************* デフォルト設定値 *************************/
+#define DEF_SLEEP_INTERVAL 3600	// 60分間隔起動
 #define DEF_WORK_TIME 180	// 3分間稼働
-#define DEF_MODULE_NUM 1	// 接続台数
-// 設定値上限下限値
+#define DEF_TRAP_MODE false // 設置モード
+/************************* 設定値上限下限値 *************************/
 #define MAX_SLEEP_INTERVAL 3600	// 60分
-#define MIN_WORK_TIME 90	// 1分（これ以上短いと設定変更するためにアクセスする暇がない）
-// 設定値jsonName
+#define MIN_SLEEP_INTERVAL 10	// 1分
+#define MIN_WORK_TIME 60	// 1分（これ以上短いと設定変更するためにアクセスする暇がない）
+#define MAX_WORK_TIME 600	// 10分
+/************************* 設定値jsonName *************************/
 #define JSON_SLEEP_INTERVAL "SleepInterval"
 #define JSON_WORK_TIME "WorkTime"
-#define JSON_MODULE_NUM "ModuleNum"
-#define TRAP "Trap"
-// json buffer number
-#define JSON_BUF_NUM 64
+#define JSON_TRAP_MODE "TrapMode"	// o -> トラップ設置モード, 1 -> トラップ起動モード
+/************************* json buffer number *************************/
+#define JSON_BUF_NUM 128
 
-// html
+/************************* html *************************/
 #define HTML_SLEEP_INTERVAL_NAME "sleepInterval"
 #define HTML_WORK_TIME_NAME "workTime"
-#define HTML_MODULE_NUM_NAME "moduleNum"
+#define HTML_TRAP_MODE_NAME "trapMode"
 
-// バッテリー関連
-#define DISCHARGE_END_VOLTAGE 620	// 放電終止電圧(1V)として1/6に分圧した場合の読み取り値
-#define BATTERY_CHECK_INTERVAL 30000	// バッテリー残量チェック間隔(msec)
+/************************* バッテリー関連 *************************/
+// #define BATTERY_CHECK	// バッテリー残量チェックを行わない場合（分圧用抵抗が無いなど）はこの行をコメントアウト
+#define DISCHARGE_END_VOLTAGE 600	// 放電終止電圧(1V)として1/6に分圧した場合の読み取り値
+#define BATTERY_CHECK_INTERVAL 30	// バッテリー残量チェック間隔(msec)
+#define JSON_BATTERY_DEAD "BatteryDead"
 
 /************************* WiFi Access Point *********************************/
 #define WLAN_SSID "YOUR_SSID"
@@ -50,10 +58,15 @@
 
 /************************* Your Milkcocoa Setup *********************************/
 #define MILKCOCOA_APP_ID "milkcocoa_app_key"
-#define MILKCOCOA_DATASTORE "milkcocoa_datastore"
+#define MILKCOCOA_DATASTORE "datastore_name"
 
 /************* Milkcocoa Setup (you don't need to change this!) ******************/
 #define MILKCOCOA_SERVERPORT 1883
+
+/************* モジュール設定初期値 ******************/
+long _sleepInterval = DEF_SLEEP_INTERVAL;
+long _workTime = DEF_WORK_TIME;
+bool _trapMode = DEF_TRAP_MODE;
 
 /************ Global State (you don't need to change this!) ******************/
 // Create an ESP8266 WiFiClient class to connect to the MQTT server.
@@ -70,29 +83,29 @@ unsigned long pastTime = 0;
 unsigned long currentTime = 0;
 // 放電終止電圧を下回ったらシャットダウン
 boolean isBatteryEnough = true;
+bool isFire = false;
 
 unsigned long messageReceiveTime = 0;
-
-// モジュール設定
-long _sleepInterval = 600;
-long _workTime = 300;
-int _moduleNum = 4;
-bool _trap = false;
 
 void setup()
 {
 	Serial.begin(115200);
+	#ifdef TRAP_CHECK
+		pinMode(TRAP_OUT, OUTPUT);
+		digitalWrite(TRAP_OUT, HIGH);
+		pinMode(TRAP_IN, INPUT);
+	#endif
 	// 一度放電終止電圧を下回ったら確実に停止するために放電終止電圧に安全率をかける
-	if (!checkBatteryRest(DISCHARGE_END_VOLTAGE * 1.05))
-	{
-		isBatteryEnough = false;
-		setupWiFi();
-		return;
-	}
+	// if (!checkBattery(DISCHARGE_END_VOLTAGE * 1.05, false))
+	// {
+	// 	isBatteryEnough = false;
+	// 	setupWiFi();
+	// 	return;
+	// }
 	// ファイルシステム
 	SPIFFS.begin();
 	pinMode(LED, OUTPUT);
-	perseModuleSetting();
+	readModuleSettingFile();
 
 	//mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
 	mesh.setDebugMsgTypes(ERROR | STARTUP); // set before init() so that you can see startup messages
@@ -103,47 +116,54 @@ void setup()
 	server.on("/", HTTP_GET, handleRoot);
 	server.on("/", HTTP_POST, handlePost);
 	server.begin();
-	Serial.println("Server started");
+	Serial.println("Trap Module Start");
 }
+
 
 void loop()
 {
-	if (!isBatteryEnough)
-	{	// バッテリーが切れていたら終了
-		milkcocoa.loop();
-		DataElement dataElement = DataElement();
-		int vcc = analogRead(A0);
-		dataElement.setValue("Battery", String(vcc).c_str());
-		milkcocoa.push(MILKCOCOA_DATASTORE, &dataElement);
-		delay(10000);
-		Serial.println("shut down...");
-		ESP.deepSleep(0);
-		return;
-	}
+	// if (!isBatteryEnough)
+	// {	// バッテリーが切れていたら終了
+	// 	milkcocoa.loop();
+	// 	DataElement dataElement = DataElement();
+	// 	int vcc = analogRead(A0);
+	// 	dataElement.setValue("Battery", String(vcc).c_str());
+	// 	milkcocoa.push(MILKCOCOA_DATASTORE, &dataElement);
+	// 	delay(10000);
+	// 	Serial.println("shut down...");
+	// 	ESP.deepSleep(0);
+	// 	return;
+	// }
 
-	currentTime = millis();
-	if ( currentTime - pastTime > BATTERY_CHECK_INTERVAL )
+	if ( !checkBattery(DISCHARGE_END_VOLTAGE, true) )
 	{
-		// 放電終止電圧を下回ったら再起動して終了処理
-		pastTime = currentTime;
-		if ( !checkBatteryRest(DISCHARGE_END_VOLTAGE) )
-		{
-			Serial.println("Battery limit...");
-			ESP.deepSleep(3 * 1000 * 1000);
-		}
+		Serial.println("Battery limit...");
+		ESP.deepSleep(0);
+		// ESP.deepSleep(3 * 1000 * 1000);
 	}
 
-	if (millis() > _workTime * 1000)
+	if ( _trapMode && _sleepInterval != 0 && millis() > _workTime * 1000)
 	{
 		Serial.println("move sleep mode...");
 		ESP.deepSleep(_sleepInterval * 1000 * 1000);
 	}
 
+	#ifdef TRAP_CHECK
+		// 起動 3 秒後から検知開始(起動直後はちょっと不安)
+		if ( !isFire && _trapMode && millis() > 3 * 1000 && digitalRead(TRAP_IN)) {
+			Serial.println("trap fire");
+			sendTrapFire();
+			isFire = true;
+		}
+	#endif
+
 	mesh.update();
 	server.handleClient();
 
 	// run the blinky
-	blinkLed(mesh.connectionCount());
+	if (!_trapMode) {
+		blinkLed(mesh.connectionCount());
+	}
 }
 
 /***************************************
@@ -153,7 +173,29 @@ void loop()
 void receivedCallback(uint32_t from, String &msg)
 {
 	messageReceiveTime = millis();
-	perseMessage(msg);
+	// メッセージを Json 化
+	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
+	JsonObject &jsonMessage = jsonBuf.parseObject(msg);
+	if (!jsonMessage.success()) {
+		return;
+	}
+	// 子モジュールはバッテリー切れ端末が発生しても特に何もしない
+	if (jsonMessage.containsKey(JSON_BATTERY_DEAD)) {
+		Serial.println("battery dead message");
+		return;
+	}
+	if (jsonMessage.containsKey(JSON_TRAP_FIRE)) {
+		Serial.println("trap fire message");
+		return;
+	}
+	boolean preTrapMode = _trapMode;
+	updateModuleSetting(jsonMessage);
+	saveCurrentModuleSeting();
+	// 設置モードから罠モードへ移行
+	if (!preTrapMode && _trapMode) {
+		beginTrapModeLed(preTrapMode);
+		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+	}
 }
 
 // 新規メッシュネットワーク接続モジュールがあった場合のコールバック
@@ -190,27 +232,24 @@ void setupWiFi()
 	端末設定入出力
 *****************************************/
 // デフォルト設定を書き込む
-// 起動間隔：10分
-// 稼働時間：3分
 void setDefaultModuleSetting()
 {
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
 	JsonObject& defaultConfig = jsonBuf.createObject();
 	defaultConfig[JSON_SLEEP_INTERVAL] = DEF_SLEEP_INTERVAL;
 	defaultConfig[JSON_WORK_TIME] = DEF_WORK_TIME;
-	defaultConfig[JSON_MODULE_NUM] = DEF_MODULE_NUM;
-	saveModuleSetting(defaultConfig);
 }
 
 // モジュールに保存してある設定を読み出す
 // ファイルが存在しない場合（初回起動時）はデフォルト値の設定ファイルを作成する
 // 設定値はjson形式のファイルとする
-void perseModuleSetting()
+void readModuleSettingFile()
 {
 	File file = SPIFFS.open("/config.json", "r");
 	if (!file)
 	{
 		setDefaultModuleSetting();
+		saveCurrentModuleSeting();
 		return;
 	}
 	size_t size = file.size();
@@ -218,6 +257,7 @@ void perseModuleSetting()
 	{
 		file.close();
 		setDefaultModuleSetting();
+		saveCurrentModuleSeting();
 		return;
 	}
 
@@ -230,44 +270,96 @@ void perseModuleSetting()
 		Serial.println("config read fail");
 		file.close();
 		setDefaultModuleSetting();
+		saveCurrentModuleSeting();
 		return;
 	}
-	_sleepInterval = config[String(JSON_SLEEP_INTERVAL)];
-	_sleepInterval = _sleepInterval > MAX_SLEEP_INTERVAL ? MAX_SLEEP_INTERVAL : _sleepInterval;
-	_workTime = config[String(JSON_WORK_TIME)];
-	_workTime = _workTime < MIN_WORK_TIME ? MIN_WORK_TIME : _workTime;
-	_moduleNum = config[String(JSON_MODULE_NUM)];
+	updateModuleSetting(config);
 	file.close();
+	saveCurrentModuleSeting();
 	Serial.println("config read success");
 }
 
+/**
+ * モジュール設定値を更新(設定可能範囲を考慮)
+ */
+void updateModuleSetting(JsonObject& config) {
+	if (!config.success()) {
+		setDefaultModuleSetting();
+	}
+	// 起動間隔
+	if (config[JSON_SLEEP_INTERVAL] < MIN_SLEEP_INTERVAL) {
+		_sleepInterval = MIN_SLEEP_INTERVAL;
+	} else if (config[JSON_SLEEP_INTERVAL] > MAX_SLEEP_INTERVAL) {
+		_sleepInterval = MAX_SLEEP_INTERVAL;
+	} else {
+		_sleepInterval = config[JSON_SLEEP_INTERVAL];
+	}
+	// 稼働時間
+	if (config[JSON_WORK_TIME] < MIN_WORK_TIME) {
+		_workTime = MIN_WORK_TIME;
+	} else if (config[JSON_WORK_TIME] > MAX_WORK_TIME) {
+		_workTime = MAX_WORK_TIME;
+	} else {
+		_workTime = config[JSON_WORK_TIME];
+	}
+	// 罠モード
+	_trapMode = config[JSON_TRAP_MODE];
+}
+
 // 設定ファイルを保存する
-void saveModuleSetting(JsonObject &config)
+boolean saveModuleSetting(const JsonObject &config)
 {
 	File file = SPIFFS.open("/config.json", "w");
 	if (!file)
 	{
 		Serial.println("File Open Error");
-		return;
+		return false;
 	}
 	config.printTo(file);
 	file.close();
+	return true;
 }
 
-// モジュール間のメッセージを解析(json形式を想定)
-void perseMessage(String &message)
-{
-	if (message == NULL || message.length())
-		return;
-
+/**
+ * 現在の設定値を保存
+ **/
+boolean saveCurrentModuleSeting() {
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
-	JsonObject &config = jsonBuf.parseObject(message);
-	if (!config.success())
-	{
-		Serial.println("message perse fail");
-		return;
-	}
-	saveModuleSetting(config);
+	JsonObject &config = jsonBuf.createObject();
+	config[JSON_TRAP_MODE] = _trapMode;
+	config[JSON_SLEEP_INTERVAL] = _sleepInterval;
+	config[JSON_WORK_TIME] = _workTime;
+	return saveModuleSetting(config);
+}
+
+// 端末電池切れ通知
+void sendBatteryDead() {
+	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
+	JsonObject &batteryDead = jsonBuf.createObject();
+	batteryDead[JSON_BATTERY_DEAD] = mesh.getChipId();
+	String message;
+	batteryDead.printTo(message);
+	mesh.sendBroadcast(message);
+}
+
+/**
+ * トラップ通知送信
+ **/
+void sendTrapFire() {
+	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
+	JsonObject &trapFire = jsonBuf.createObject();
+	trapFire[JSON_TRAP_FIRE] = mesh.getChipId();
+	String message;
+	trapFire.printTo(message);
+	mesh.sendBroadcast(message);
+}
+
+void beginTrapModeLed(boolean preTrapMode) {
+	unsigned long blink = millis();
+	uint8_t temp = 1;
+	digitalWrite(LED, HIGH);
+	delay(5000);
+	digitalWrite(LED, LOW);
 }
 
 /************************************
@@ -287,64 +379,100 @@ void handlePost()
 	JsonObject &config = jsonBuf.createObject();
 
 	// 設定値反映
+	// 起動間隔
 	String sleepInterval = server.arg(HTML_SLEEP_INTERVAL_NAME);
 	if (sleepInterval != NULL && sleepInterval.length() != 0)
 	{
 		config[JSON_SLEEP_INTERVAL] = sleepInterval.toInt();
-		_sleepInterval = sleepInterval.toInt();
-		_sleepInterval = _sleepInterval > MAX_SLEEP_INTERVAL ? MAX_SLEEP_INTERVAL : _sleepInterval;
+	} else {
+		config[JSON_SLEEP_INTERVAL] = _sleepInterval;
 	}
+	// 稼働時間
 	String workTime = server.arg(HTML_WORK_TIME_NAME);
 	if (workTime != NULL && workTime.length() != 0)
 	{
 		config[JSON_WORK_TIME] = workTime.toInt();
-		_workTime = workTime.toInt();
-		_workTime = _workTime < MIN_WORK_TIME ? MIN_WORK_TIME : _workTime;
+	} else {
+		config[JSON_WORK_TIME] = _workTime;
 	}
-	String moduleNum = server.arg(HTML_MODULE_NUM_NAME);
-	if (moduleNum != NULL && moduleNum.length() != 0)
+	// 罠モード
+	String trapMode = server.arg(HTML_TRAP_MODE_NAME);
+	if (trapMode != NULL && trapMode.length() != 0)
 	{
-		config[JSON_MODULE_NUM] = moduleNum.toInt();
-		_moduleNum = moduleNum.toInt();
+		config[JSON_TRAP_MODE] = trapMode.toInt();
+	} else {
+		config[JSON_TRAP_MODE] = _trapMode;
 	}
 
-	// テスト用
-	// String trap = server.arg("trap");
-	// if (trap != NULL && trap.length() != 0)
-	// 	_trap = trap.toInt() == 0 ? false : true;
-
+	// 設定値を全モジュールに反映
 	String html = "";
-	String message;
-	config.printTo(message);
-	if (mesh.sendBroadcast(message))
-	{
-		messageReceiveTime = millis();
-		html += "<h1>Send Success</h1>";
-	}
-	else
-	{
-		html += "<h1>Send Fail</h1>";
+	boolean preTrapMode = _trapMode;
+	Serial.print("preTestMode:");
+	Serial.println(preTrapMode);
+	if (updateAllModuleSettings(config)) {
+		updateModuleSetting(config);
+		saveCurrentModuleSeting();
+		html += "<h1>Set Success</h1>";
+		if (!preTrapMode && _trapMode) {
+			html += "<h1>Module Sleep After 5 sec...</h1>";
+		}
+	} else {
+		html += "<h1>Set Fail</h1>";
 	}
 	html += createSettingHtml();
-
-	saveModuleSetting(config);
 	server.send(200, "text/html", html);
+	// 設置モードから罠モードへ移行
+	if (!preTrapMode && _trapMode) {
+		beginTrapModeLed(preTrapMode);
+		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+	}
+}
+
+/**
+ * 設定値を全モジュールに反映する
+ **/
+boolean updateAllModuleSettings(const JsonObject& config) {
+	String message;
+	config.printTo(message);
+	uint8_t retryCount = 5;
+	while (retryCount > 0) {
+		if (mesh.sendBroadcast(message)) {
+			return true;
+		}
+		--retryCount;
+		delay(5000);
+	}
+	return false;
 }
 
 /************************************
 	HW機能
 ************************************/
-// 1/6に分圧した電圧が放電終止電圧1V * 4として
-// vccLimit 放電終止電圧
-// 放電終止電圧以上->true
-// 放電終止電圧以下->false
-boolean checkBatteryRest(int vccLimit)
+/**
+ * 1/6に分圧した電圧が放電終止電圧1V * 4としてバッテリーが
+ * 放電終止電圧を下回っていないか[BATTERY_CHECK_INTERVAL]秒毎にチェックする
+ * vccLimit 放電終止電圧
+ * isInterval true:一定時間毎にチェック false:直ちにチェック
+ * 放電終止電圧以上->true
+ * 放電終止電圧以下->false
+ **/
+boolean checkBattery(int vccLimit, boolean isInterval)
 {
-	int vcc = analogRead(A0);
-	if (vcc > vccLimit)
+	#ifndef BATTERY_CHECK
 		return true;
+	#endif
 
-	return false;
+	#ifdef BATTERY_CHECK
+		if (isInterval && millis() - pastTime < BATTERY_CHECK_INTERVAL * 1000 ) {
+			return true;
+		}
+		pastTime = millis();
+		int vcc = analogRead(A0);
+		if (vcc > vccLimit)
+			return true;
+
+		return false;
+	#endif
 }
 
 // メッシュネットワークを形成しているモジュール数だけ
@@ -379,36 +507,49 @@ String createSettingHtml()
 	html += "            <input type='number' name='workTime' placeholder='WorkTime'>";
 	html += "        </div>";
 	html += "        <div>";
-	html += "            <span>ModuleNum</span>";
-	html += "            <input type='number' name='moduleNum' placeholder='ModuleNum'>";
-	html += "        </div>";
-	html += "        <div>";
 	html += "            <span>Trap</span>";
-	html += "            <select name='trap'>";
-	html += "            <option value='trapOff'>OFF</option>";
-	html += "            <option value='trapOn'>ON</option>";
-	html += "        </select>";
+	html += "            <select name='trapMode'>";
+	if (_trapMode) {
+		html += "                <option value='0'>Trap Set Mode</option>";
+		html += "                <option value='1' selected>Trap Start</option>";
+	} else {
+		html += "                <option value='0' selected>Trap Set Mode</option>";
+		html += "                <option value='1'>Trap Start</option>";
+	}
+	html += "            </select>";
 	html += "        </div>";
 	html += "        <input type='submit'>";
 	html += "    </form>";
 	html += "</div>";
 	html += "<div>";
 	html += "    <h1>ModuleInfo</h1>";
+	html += "    <span>TrapMode:";
+	html += _trapMode ? "Trap Start Mode" : "Tarp Set Mode" ;
+	html += "    </span><br>";
 	html += "    <span>ModuleID:";
 	html += mesh.getChipId();
-	html += "</span><br>";
+	html += "    </span><br>";
 	html += "    <span>SleepInterval(max:3600sec):";
 	html += _sleepInterval;
-	html += "</span><br>";
+	html += "    </span><br>";
 	html += "    <span>WokeTime(min:60sec):";
 	html += _workTime;
-	html += "</span><br>";
-	html += "    <span>ModuleNum:";
-	html += _moduleNum;
-	html += "</span><br>";
+	html += "    </span><br>";
 	html += "    <span>ConnectionCount:";
-	html += mesh.connectionCount();
-	html += "</span><br>";
+	html += mesh.connectionCount() + 1;
+	html += "    </span>";
+	html += "    <ul>";
+	html += "        <li>";
+	html += mesh.getChipId();
+	html += "        </li>";
+	SimpleList<meshConnectionType>::iterator connection = mesh._connections.begin();
+    while ( connection != mesh._connections.end() ) {
+		html += "<li>";
+        html += connection->chipId;
+		html += "</li>";
+        connection++;
+    }
+	html += "    </ul>";
 	html += "</div>";
 	return html;
 }
