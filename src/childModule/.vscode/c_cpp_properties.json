@@ -3,7 +3,12 @@
         {
             "name": "Win32",
             "includePath": [
-                "C:\\Users\\to-nishi\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\2.3.0\\cores\\esp8266"
+                "C:\\Users\\to-nishi\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\2.3.0\\cores\\esp8266",
+                "C:\\Program Files (x86)\\Arduino\\libraries",
+                "C:\\Users\\to-nishi\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\2.3.0\\libraries",
+                "C:/Users/Owner/Documents/Arduino/libraries/ArduinoJson",
+                "C:/Users/Owner/Documents/Arduino/libraries/easyMesh",
+                "C:/Users/Owner/Documents/Arduino/libraries/SimpleList"
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": false,
