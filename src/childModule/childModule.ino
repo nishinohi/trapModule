@@ -13,8 +13,9 @@
 
 /************************* 罠検知設定 *************************/
 #define TRAP_CHECK
-#define TRAP_OUT 12
 #define TRAP_IN 14
+/************************* 罠設置モードでの強制起動用 *************************/
+#define TRAP_SET_MODE_IN 12
 /************************* 接続モジュール数確認用LED *************************/
 #define LED 13
 #define BLINK_PERIOD 1000000  // microseconds until cycle repeat
@@ -23,7 +24,6 @@
 #define MESH_PREFIX "trapModule"
 #define MESH_PASSWORD "123456789"
 #define MESH_PORT 5555
-
 /************************* デフォルト設定値 *************************/
 #define DEF_SLEEP_INTERVAL 3600	// 60分間隔起動
 #define DEF_WORK_TIME 180	// 3分間稼働
@@ -44,26 +44,20 @@
 #define JSON_BATTERY_DEAD_MESSAGE "BatteryDeadMessage"
 /************************* json buffer number *************************/
 #define JSON_BUF_NUM 128
-
 /************************* html *************************/
 #define HTML_SLEEP_INTERVAL_NAME "sleepInterval"
 #define HTML_WORK_TIME_NAME "workTime"
 #define HTML_TRAP_MODE_NAME "trapMode"
-
 /************************* バッテリー関連 *************************/
 // #define BATTERY_CHECK	// バッテリー残量チェックを行わない場合（分圧用抵抗が無いなど）はこの行をコメントアウト
 #define DISCHARGE_END_VOLTAGE 600	// 放電終止電圧(1V)として1/6に分圧した場合の読み取り値
 #define BATTERY_CHECK_INTERVAL 30	// バッテリー残量チェック間隔(msec)
-
 /************************* WiFi Access Point *********************************/
 #define WLAN_SSID "YOUR_SSID"
 #define WLAN_PASS "YOUR_SSID_PASS"
-
 /************************* Your Milkcocoa Setup *********************************/
 #define MILKCOCOA_APP_ID "milkcocoa_app_key"
 #define MILKCOCOA_DATASTORE "datastore_name"
-
-/************* Milkcocoa Setup (you don't need to change this!) ******************/
 #define MILKCOCOA_SERVERPORT 1883
 
 /************* モジュール設定初期値 ******************/
@@ -73,7 +67,6 @@ bool _trapMode = DEF_TRAP_MODE;
 bool _trapFire = DEF_TRAP_FIRE;
 
 /************ Global State (you don't need to change this!) ******************/
-// Create an ESP8266 WiFiClient class to connect to the MQTT server.
 WiFiClient client;
 const char MQTT_SERVER[] PROGMEM = MILKCOCOA_APP_ID ".mlkcca.com";
 const char MQTT_CLIENTID[] PROGMEM = __TIME__ MILKCOCOA_APP_ID;
@@ -84,10 +77,8 @@ ESP8266WebServer server(80);
 
 // 時間計測
 unsigned long pastTime = 0;
-unsigned long currentTime = 0;
 // 放電終止電圧を下回ったらシャットダウン
 boolean isBatteryEnough = true;
-bool isFire = false;
 bool isTrapStart = false;
 
 unsigned long messageReceiveTime = 0;
@@ -95,9 +86,10 @@ unsigned long messageReceiveTime = 0;
 void setup()
 {
 	Serial.begin(115200);
+	// ファイルシステム
+	SPIFFS.begin();
+
 	#ifdef TRAP_CHECK
-		pinMode(TRAP_OUT, OUTPUT);
-		digitalWrite(TRAP_OUT, HIGH);
 		pinMode(TRAP_IN, INPUT);
 	#endif
 	// 一度放電終止電圧を下回ったら確実に停止するために放電終止電圧に安全率をかける
@@ -107,10 +99,15 @@ void setup()
 	// 	setupWiFi();
 	// 	return;
 	// }
-	// ファイルシステム
-	SPIFFS.begin();
+	
 	pinMode(LED, OUTPUT);
+	pinMode(TRAP_SET_MODE_IN, INPUT);
 	readModuleSettingFile();
+	// 罠設置モードスイッチが押下された状態で起動した場合設定値を上書き
+	if (digitalRead(TRAP_SET_MODE_IN)) {
+		_trapMode = false;
+		saveCurrentModuleSeting();
+	}
 
 	//mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
 	mesh.setDebugMsgTypes(ERROR | STARTUP); // set before init() so that you can see startup messages
