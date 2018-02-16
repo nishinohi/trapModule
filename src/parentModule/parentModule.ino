@@ -1,5 +1,5 @@
 //************************************************************
-// 罠モジュール子機
+// 罠モジュール親機
 // 子機、または親機とメッシュネットワークを形成する.
 // また、子機自身がサーバーとしても起動しているため、
 // 子機のネットワークに入り、子機のipアドレスにアクセスすると、
@@ -7,10 +7,29 @@
 //************************************************************
 #include <ESP8266WebServer.h>
 #include <easyMesh.h>
-#include <Milkcocoa.h>
 #include <FS.h>
 #include <WiFiClient.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_FONA.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+#include <Adafruit_MQTT_FONA.h>
 
+static const char kCodeCR = '\r';
+static const char kCodeLF = '\n';
+
+/************************* SIM 設定 *************************/
+#define APN "soracom.io"
+#define USERNAME "sora"
+#define PASSWORD "sora"
+/************************* temp 設定 *************************/
+#define MILKCOCOA_APP_ID "maxj066rj51"
+#define MILKCOCOA_DATASTORE "testNotif"
+#define MILKCOCOA_SERVERPORT  1883
+/************************* 親機用 GPIO 設定 *************************/
+#define FONA_RX 5
+#define FONA_TX 4
+#define FONA_RST 2
 /************************* 罠検知設定 *************************/
 #define TRAP_CHECK
 #define TRAP_IN 14
@@ -55,10 +74,6 @@
 /************************* WiFi Access Point *********************************/
 #define WLAN_SSID "YOUR_SSID"
 #define WLAN_PASS "YOUR_SSID_PASS"
-/************************* Your Milkcocoa Setup *********************************/
-#define MILKCOCOA_APP_ID "milkcocoa_app_key"
-#define MILKCOCOA_DATASTORE "datastore_name"
-#define MILKCOCOA_SERVERPORT 1883
 
 /************* モジュール設定初期値 ******************/
 long _sleepInterval = DEF_SLEEP_INTERVAL;
@@ -66,14 +81,32 @@ long _workTime = DEF_WORK_TIME;
 bool _trapMode = DEF_TRAP_MODE;
 bool _trapFire = DEF_TRAP_FIRE;
 
-/************ Global State (you don't need to change this!) ******************/
-WiFiClient client;
-const char MQTT_SERVER[] PROGMEM = MILKCOCOA_APP_ID ".mlkcca.com";
-const char MQTT_CLIENTID[] PROGMEM = __TIME__ MILKCOCOA_APP_ID;
-Milkcocoa milkcocoa = Milkcocoa(&client, MQTT_SERVER, MILKCOCOA_SERVERPORT, MILKCOCOA_APP_ID, MQTT_CLIENTID);
-
 easyMesh mesh;
+uint32 parentChipId = 0;
 ESP8266WebServer server(80);
+
+// soracom beam Setting
+const char MQTT_SERVER[] = "beam.soracom.io";
+const char MQTT_CLIENTID[] = __TIME__ MILKCOCOA_APP_ID;
+
+// Serial Setting
+SoftwareSerial fonaSS = SoftwareSerial(FONA_RX, FONA_TX);
+SoftwareSerial *fonaSerial = &fonaSS;
+
+// 3G Setting
+Adafruit_FONA_3G fona = Adafruit_FONA_3G(FONA_RST);
+
+// mqtt Setting
+Adafruit_MQTT_FONA mqtt(&fona, MQTT_SERVER, MILKCOCOA_SERVERPORT, MQTT_CLIENTID, "sora", "sora");
+char gpsData[64] = "\0";
+char imsi[16];
+bool childFire = false;
+
+// fire child
+#define CHILDREN_MAX 10
+uint32 firedChildren[CHILDREN_MAX] = {0};
+
+boolean isNetOpen = false;
 
 // 時間計測
 unsigned long pastTime = 0;
@@ -81,7 +114,36 @@ unsigned long pastTime = 0;
 boolean isBatteryEnough = true;
 bool isTrapStart = false;
 
-unsigned long messageReceiveTime = 0;
+boolean fonaBegin()
+{
+	fonaSerial->begin(115200);
+	if (!fona.begin(*fonaSerial)) {
+		Serial.println(F("Couldn't find FONA"));
+		return false;
+	}
+	uint8_t len = fona.getSIMIMSI(imsi);
+	if (len <= 0) {
+		Serial.println("failed to read sim");
+		return false;
+	}
+	Serial.println(F("FONA is OK"));
+	delay(500);
+	// net open
+	fona.setGPRSNetworkSettings(F(APN), F(USERNAME), F(PASSWORD));
+	if (!fona.enableGPRS(true))	{
+		Serial.println(F("Failed to enable 3G"));
+		return false;
+	}
+	if (!fona.enableGPS(true)) {
+		Serial.println(F("Failed to enable GPS"));
+		return false;
+	}
+	// connec mqtt
+    if (!MQTT_connect(5)) {
+      return false;
+    }
+	return true;
+}
 
 void setup()
 {
@@ -121,7 +183,6 @@ void setup()
 	Serial.println("Trap Module Start");
 }
 
-
 void loop()
 {
 	// if (!isBatteryEnough)
@@ -150,16 +211,56 @@ void loop()
 
 	if ( _trapMode && _sleepInterval != 0 && millis() > _workTime * 1000)
 	{
-		Serial.println("move sleep mode...");
-		ESP.deepSleep(_sleepInterval * 1000 * 1000);
+		if (childFire) {
+			unsigned long current = millis();
+			if (!fonaBegin()) {
+				Serial.println("begin fail move sleep mode...");
+				ESP.deepSleep(_sleepInterval * 1000 * 1000);
+			}
+			while (millis() - current <= 60 * 1000) {
+				float lat = 0.0f;
+				float lon = 0.0f;
+				if (fona.getGPS(&lat, &lon) <= 0) {
+					Serial.println("GPS GET Failed");
+					delay(2000);
+				} else {
+					// for (int ii = 0; ii < CHILDREN_MAX; ++ii)
+					// {
+					// 	if (firedChildren[ii] == 0) {
+					// 		continue;
+					// 	}
+					// 	String temp = String(firedChildren[ii]);
+					// 	push("/test/mqtt", temp.c_str());
+					// 	delay(300);
+					// 	sendGPSData(lat, lon);
+					// 	delay(300);
+					// }
+					push("/test/mqtt", "test");
+					sendGPSData(lat, lon);
+					break;
+				}
+			}
+			// shutdown fona
+			if (!fona.shutdown()) {
+				fona.shutdown(true);
+			}
+			uint32_t cellularProcessTime = (millis() - current) * 1000;
+			if (_sleepInterval * 1000 * 1000 > cellularProcessTime) {
+				Serial.println("move sleep mode...");
+				ESP.deepSleep(_sleepInterval * 1000 * 1000 - cellularProcessTime);
+			}
+		} else {
+			Serial.println("move sleep mode...");
+			ESP.deepSleep(_sleepInterval * 1000 * 1000);
+		}
 	}
 
 	#ifdef TRAP_CHECK
 		// 起動 3 秒後から検知開始(起動直後はちょっと不安)
-		if ( !_trapFire && _trapMode && millis() > 3 * 1000 && digitalRead(TRAP_IN)) {
+		if ( !_trapFire && _trapMode && millis() > 30 * 1000 && digitalRead(TRAP_IN)) {
 			Serial.println("trap fire");
 			_trapFire = true;
-			sendTrapFire();
+			// sendTrapFire();
 			saveCurrentModuleSeting();
 		}
 	#endif
@@ -170,6 +271,8 @@ void loop()
 	// run the blinky
 	if (!_trapMode) {
 		blinkLed(mesh.connectionCount());
+	} else {
+		digitalWrite(LED, HIGH);
 	}
 }
 
@@ -179,7 +282,6 @@ void loop()
 // メッセージがあった場合のコールバック
 void receivedCallback(uint32_t from, String &msg)
 {
-	messageReceiveTime = millis();
 	// メッセージを Json 化
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
 	JsonObject &jsonMessage = jsonBuf.parseObject(msg);
@@ -191,8 +293,17 @@ void receivedCallback(uint32_t from, String &msg)
 		Serial.println("battery dead message");
 		return;
 	}
+	// 罠検知メッセージ受信
 	if (jsonMessage.containsKey(JSON_TRAP_FIRE_MESSAGE)) {
+		childFire = true;
 		Serial.println("trap fire message");
+		for (int ii = 0; ii < CHILDREN_MAX; ++ii) {
+			if (firedChildren[ii] != 0) {
+				continue;
+			}
+			firedChildren[ii] = jsonMessage[JSON_TRAP_FIRE_MESSAGE];
+			break;
+		}
 		return;
 	}
 	// 罠検知済みフラグは自身の設定値を反映
@@ -210,12 +321,6 @@ void receivedCallback(uint32_t from, String &msg)
 void newConnectionCallback(bool adopt)
 {
 	Serial.printf("startHere: New Connection, adopt=%d\n", adopt);
-}
-
-// milkcocoa データ登録完了コールバック
-void onpush(DataElement *elem)
-{
-	Serial.println("milkcocoa on push");
 }
 
 // wifi セットアップ
@@ -313,6 +418,7 @@ void updateModuleSetting(JsonObject& config) {
 	}
 	// 罠モード
 	_trapMode = config[JSON_TRAP_MODE];
+	// 罠検知済みフラグ
 	_trapFire = _trapMode ? config[JSON_TRAP_FIRE] : false;
 }
 
@@ -500,11 +606,67 @@ void blinkLed(uint8_t meshNodeCount)
 	digitalWrite(LED, onFlag);
 }
 
+/****************************************
+ * 親機の機能
+ ***************************************/
+/**
+ * GPS　データをpushする
+ **/
+void sendGPSData(float &lat, float &lon) {
+	char latStr[16] = "\0";
+	char lonStr[16] = "\0";
+	char temp[16];
+	char *p;
+	dtostrf(lat, 15, 6, temp);
+	p = strtok(temp, " ");
+	strncpy(latStr, p, strlen(p));
+	dtostrf(lon, 15, 6, temp);
+	p = strtok(temp, " ");
+	strncpy(lonStr, p, strlen(p));
+
+	sprintf(gpsData, "%s,%s", latStr, lonStr);
+	char topic[64] = "/test/mqtt/gps/";
+	strcat(topic, imsi);
+	push(topic, gpsData);
+}
+
+boolean MQTT_connect(uint8_t tryCount) {
+	int8_t ret;
+	// Stop if already connected.
+	if (mqtt.connected()) {
+		return true;
+	}
+	Serial.print("Connecting to MQTT... ");
+
+	while (tryCount > 0) {
+		// connect will return 0 for connected
+		if (mqtt.connect() == 0) {
+			Serial.println("MQTT Connected!");
+			return true;
+		}
+		Serial.println(mqtt.connectErrorString(ret));
+		Serial.println("Retrying MQTT connection in 5 seconds...");
+		mqtt.disconnect();
+		delay(5000); // wait 5 seconds
+		--tryCount;
+	}
+	return false;
+}
+
+boolean push(const char *topic, const char *message) {
+	bool ret;
+	Adafruit_MQTT_Publish pushPublisher = Adafruit_MQTT_Publish(&mqtt, topic);
+	ret = pushPublisher.publish(message);
+	return ret;
+}
+
+//////////////////////////////////////////////////////////
 // html生成
+//////////////////////////////////////////////////////////
 String createSettingHtml()
 {
 	String html = "<div>";
-	html += "    <h1>ModuleSetting</h1>";
+	html += "    <h1>Parent Module</h1>";
 	html += "    <form method='post'>";
 	html += "        <div>";
 	html += "            <span>SleepInterval(s)</span>";
