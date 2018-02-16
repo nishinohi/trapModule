@@ -7,7 +7,6 @@
 //************************************************************
 #include <ESP8266WebServer.h>
 #include <easyMesh.h>
-#include <Milkcocoa.h>
 #include <FS.h>
 #include <WiFiClient.h>
 
@@ -55,10 +54,6 @@
 /************************* WiFi Access Point *********************************/
 #define WLAN_SSID "YOUR_SSID"
 #define WLAN_PASS "YOUR_SSID_PASS"
-/************************* Your Milkcocoa Setup *********************************/
-#define MILKCOCOA_APP_ID "milkcocoa_app_key"
-#define MILKCOCOA_DATASTORE "datastore_name"
-#define MILKCOCOA_SERVERPORT 1883
 
 /************* モジュール設定初期値 ******************/
 long _sleepInterval = DEF_SLEEP_INTERVAL;
@@ -66,13 +61,8 @@ long _workTime = DEF_WORK_TIME;
 bool _trapMode = DEF_TRAP_MODE;
 bool _trapFire = DEF_TRAP_FIRE;
 
-/************ Global State (you don't need to change this!) ******************/
-WiFiClient client;
-const char MQTT_SERVER[] PROGMEM = MILKCOCOA_APP_ID ".mlkcca.com";
-const char MQTT_CLIENTID[] PROGMEM = __TIME__ MILKCOCOA_APP_ID;
-Milkcocoa milkcocoa = Milkcocoa(&client, MQTT_SERVER, MILKCOCOA_SERVERPORT, MILKCOCOA_APP_ID, MQTT_CLIENTID);
-
 easyMesh mesh;
+uint32 parentChipId = 0;
 ESP8266WebServer server(80);
 
 // 時間計測
@@ -80,8 +70,6 @@ unsigned long pastTime = 0;
 // 放電終止電圧を下回ったらシャットダウン
 boolean isBatteryEnough = true;
 bool isTrapStart = false;
-
-unsigned long messageReceiveTime = 0;
 
 void setup()
 {
@@ -155,8 +143,9 @@ void loop()
 	}
 
 	#ifdef TRAP_CHECK
-		// 起動 3 秒後から検知開始(起動直後はちょっと不安)
-		if ( !_trapFire && _trapMode && millis() > 3 * 1000 && digitalRead(TRAP_IN)) {
+		// TODO: メッシュネットワーク数が規定数になったら、もしくは親モジュールと接続したら検知情報を送信
+		// 起動 30 秒後から検知情報を送信(起動直後はメッシュネットワークが不安定かもしれない)
+		if ( !_trapFire && _trapMode && millis() > 30 * 1000 && digitalRead(TRAP_IN)) {
 			Serial.println("trap fire");
 			_trapFire = true;
 			sendTrapFire();
@@ -170,6 +159,8 @@ void loop()
 	// run the blinky
 	if (!_trapMode) {
 		blinkLed(mesh.connectionCount());
+	} else {
+		digitalWrite(LED, HIGH);
 	}
 }
 
@@ -179,7 +170,6 @@ void loop()
 // メッセージがあった場合のコールバック
 void receivedCallback(uint32_t from, String &msg)
 {
-	messageReceiveTime = millis();
 	// メッセージを Json 化
 	StaticJsonBuffer<JSON_BUF_NUM> jsonBuf;
 	JsonObject &jsonMessage = jsonBuf.parseObject(msg);
@@ -191,6 +181,7 @@ void receivedCallback(uint32_t from, String &msg)
 		Serial.println("battery dead message");
 		return;
 	}
+	// 罠検知メッセージ受信（子モジュールは何もしない）
 	if (jsonMessage.containsKey(JSON_TRAP_FIRE_MESSAGE)) {
 		Serial.println("trap fire message");
 		return;
@@ -210,12 +201,6 @@ void receivedCallback(uint32_t from, String &msg)
 void newConnectionCallback(bool adopt)
 {
 	Serial.printf("startHere: New Connection, adopt=%d\n", adopt);
-}
-
-// milkcocoa データ登録完了コールバック
-void onpush(DataElement *elem)
-{
-	Serial.println("milkcocoa on push");
 }
 
 // wifi セットアップ
@@ -313,6 +298,7 @@ void updateModuleSetting(JsonObject& config) {
 	}
 	// 罠モード
 	_trapMode = config[JSON_TRAP_MODE];
+	// 罠検知済みフラグ
 	_trapFire = _trapMode ? config[JSON_TRAP_FIRE] : false;
 }
 
@@ -504,7 +490,7 @@ void blinkLed(uint8_t meshNodeCount)
 String createSettingHtml()
 {
 	String html = "<div>";
-	html += "    <h1>ModuleSetting</h1>";
+	html += "    <h1>Child Module</h1>";
 	html += "    <form method='post'>";
 	html += "        <div>";
 	html += "            <span>SleepInterval(s)</span>";
