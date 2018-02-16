@@ -3,5 +3,5 @@
     "board": "esp8266:esp8266:generic",
     "configuration": "CpuFrequency=80,FlashFreq=80,FlashMode=qio,UploadSpeed=256000,FlashSize=4M1M,ResetMethod=nodemcu,Debug=Serial,DebugLevel=None____",
     "port": "COM3",
-    "output": "../build"
+    "output": "./build"
 }

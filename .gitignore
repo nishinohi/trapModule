@@ -1,3 +1,4 @@
-
-*/build/*
-!*/build/.gitkeep
+/src/childModule/build/*
+!/src/childModule/build/.gitkeep
+/src/parentModule/build/*
+!/src/parentModule/build/.gitkeep
