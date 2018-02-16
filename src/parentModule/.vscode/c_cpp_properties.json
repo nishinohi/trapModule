@@ -7,7 +7,10 @@
                 "C:\\Users\\to-nishi\\AppData\\Local\\Arduino15\\packages\\esp8266\\hardware\\esp8266\\2.4.0\\libraries",
                 "C:/Users/Owner/Documents/Arduino/libraries/ArduinoJson",
                 "C:/Users/Owner/Documents/Arduino/libraries/easyMesh",
-                "C:/Users/Owner/Documents/Arduino/libraries/SimpleList"
+                "C:/Users/Owner/Documents/Arduino/libraries/Adafruit_MQTT_Library",
+                "C:/Users/Owner/Documents/Arduino/libraries/Adafruit_FONA",
+                "C:/Users/Owner/Documents/Arduino/libraries/aJson",
+            "C:/Users/Owner/Documents/Arduino/libraries/SimpleList"
             ],
             "browse": {
                 "limitSymbolsToIncludedHeaders": false,
@@ -17,6 +20,9 @@
                     "C:/Users/Owner/Documents/Arduino/libraries/ArduinoJson",
                     "C:/Users/Owner/Documents/Arduino/libraries/easyMesh",
                     "C:/Users/Owner/Documents/Arduino/libraries/SimpleList",
+                    "C:/Users/Owner/Documents/Arduino/libraries/Adafruit_MQTT_Library",
+                    "C:/Users/Owner/Documents/Arduino/libraries/Adafruit_FONA",
+                    "C:/Users/Owner/Documents/Arduino/libraries/aJson",
                     "${workspaceRoot}"
                 ]
             },
