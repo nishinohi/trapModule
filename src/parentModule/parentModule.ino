@@ -211,12 +211,13 @@ void loop()
 
 	if ( _trapMode && _sleepInterval != 0 && millis() > _workTime * 1000)
 	{
-		if (childFire) {
+		if (childFire || _trapFire) {
 			unsigned long current = millis();
 			if (!fonaBegin()) {
 				Serial.println("begin fail move sleep mode...");
 				ESP.deepSleep(_sleepInterval * 1000 * 1000);
 			}
+			push("/test/mqtt", "えものがかかりました");
 			while (millis() - current <= 60 * 1000) {
 				float lat = 0.0f;
 				float lon = 0.0f;
@@ -235,7 +236,6 @@ void loop()
 					// 	sendGPSData(lat, lon);
 					// 	delay(300);
 					// }
-					push("/test/mqtt", "test");
 					sendGPSData(lat, lon);
 					break;
 				}
@@ -628,6 +628,14 @@ void sendGPSData(float &lat, float &lon) {
 	char topic[64] = "/test/mqtt/gps/";
 	strcat(topic, imsi);
 	push(topic, gpsData);
+}
+
+void fToChar(float& value, char* dist, uint8_t& digits, uint8_t& decimalPoint) {
+	char temp[digits + 1];
+	char* p;
+	dtostrf(value, digits, decimalPoint, temp);
+	p = strtok(temp, " ");
+	strncpy(dist, p, strlen(p));
 }
 
 boolean MQTT_connect(uint8_t tryCount) {
